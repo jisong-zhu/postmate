@@ -37,23 +37,34 @@
      * Check the version of broswer is less than ie9
      */
     function isLessThanIe9() {
-        var $test = $('<b></b>').html('<!--[if IE lte 9]><i></i><![endif]-->');
-        var count = $test.find('i').length;
-        var ie = count === 1;
-        $test.remove();
-        return ie;
+        var b = document.createElement('b');
+        b.innerHTML = '<!--[if IE lte 9]><i></i><![endif]-->';
+        return b.getElementsByTagName('i').length === 1;
     }
 
+    function isIE(ver) {
+        // https://github.com/nioteam/jquery-plugins/issues/12
+        ver = ver || '';
+        var b = document.createElement('b');
+        b.innerHTML = '<!--[if IE ' + ver + ']><i></i><![endif]-->';
+        return b.getElementsByTagName('i').length === 1;
+    }
+
+    /**
+     * If broswer version is less than IE9, it must serialize Json object to String.
+     * @param {*} data Data for message, json Object
+     */
     function serialize(data) {
         data = data || {};
-        if (isLessThanIe9()) {
-            return JSON.stringify(data);
+        if (isIE()) {
+            var dataStr = JSON.stringify(data);
+            return dataStr;
         }
         return data;
     }
 
     function deserialize(data) {
-        if (isLessThanIe9()) {
+        if (isIE()) {
             data = data || '{}';
             return JSON.parse(data);
         }
@@ -77,6 +88,12 @@
     function resolveOrigin(url) {
         var a = document.createElement('a');
         a.href = url;
+        // 对于IE浏览器，尤其是IE8、IE9，如果你给.href设置一个相对的URl，取不到完整的链接属性；
+        // 然而，当你他自己的href属性再一次赋给.href时，则会返回一个绝对的URL，这时候你就可以获取所有的链接属性了。
+        // https://stackoverflow.com/questions/736513/how-do-i-parse-a-url-into-hostname-and-path-in-javascript 
+        if (a.host == "") {
+            a.href = a.href;
+        }
         return a.origin || a.protocol + '//' + a.hostname + ':' + a.port;
     }
 
@@ -88,7 +105,9 @@
      */
     function sanitize(message, allowedOrigin) {
         var eventData = deserialize(message.data);
-        if (message.origin !== allowedOrigin) return false;
+        if (message.origin !== allowedOrigin) {
+            return false;
+        }
         if (typeof eventData !== 'object') return false;
         if (!('postmate' in eventData)) return false;
         if (eventData.type !== MESSAGE_TYPE) return false;
@@ -114,6 +133,34 @@
         var unwrappedContext = typeof model[property] === 'function' ?
             model[property]() : model[property];
         return Postmate.Promise.resolve(unwrappedContext);
+    }
+
+    /**  
+     * 事件绑定，兼容各浏览器  
+     * @param target 事件触发对象   
+     * @param type   事件  
+     * @param func   事件处理函数  
+     */
+    function addEvents(target, type, func) {
+        if (target.addEventListener) //非ie 和ie9  
+            target.addEventListener(type, func, false);
+        else if (target.attachEvent) //ie6到ie8  
+            target.attachEvent("on" + type, func);
+        else target["on" + type] = func; //ie5  
+    }
+
+    /**  
+     * 事件移除，兼容各浏览器  
+     * @param target 事件触发对象  
+     * @param type   事件  
+     * @param func   事件处理函数  
+     */
+    function removeEvents(target, type, func) {
+        if (target.removeEventListener)
+            target.removeEventListener(type, func, false);
+        else if (target.detachEvent)
+            target.detachEvent("on" + type, func);
+        else target["on" + type] = null;
     }
 
     /**
@@ -144,7 +191,8 @@
             }
         };
 
-        this.parent.addEventListener('message', this.listener, false);
+        // this.parent.addEventListener('message', this.listener, false);
+        addEvents(this.parent, 'message', this.listener);
         log('Parent: Awaiting event emissions from Child');
 
         this.get = function (property) {
@@ -154,13 +202,15 @@
                 var transact = function (e) {
                     var eventData = deserialize(e.data);
                     if (eventData.uid === uid && eventData.postmate === 'reply') {
-                        self.parent.removeEventListener('message', transact, false);
+                        // self.parent.removeEventListener('message', transact, false);
+                        removeEvents(self.parent, 'message', transact);
                         resolve(eventData.value);
                     }
                 };
 
                 // Prepare for response from Child...
-                self.parent.addEventListener('message', transact, false);
+                // self.parent.addEventListener('message', transact, false);
+                addEvents(self.parent, 'message', transact);
 
                 // Then ask child for information
                 var toPostData = serialize({
@@ -189,7 +239,8 @@
 
         this.destroy = function () {
             log('Parent: Destroying Postmate instance');
-            window.removeEventListener('message', self.listener, false);
+            // window.removeEventListener('message', self.listener, false);
+            removeEvents(window, 'message', self.listener);
             self.frame.parentNode.removeChild(self.frame);
         };
     }
@@ -208,7 +259,8 @@
         log('Child: Registering API');
         log('Child: Awaiting messages...');
 
-        this.child.addEventListener('message', function (e) {
+        // this.child.addEventListener('message', function (e) {
+        addEvents(this.child, 'message', function (e) {
             if (!sanitize(e, self.parentOrigin)) return;
             log('Child: Received request', e.data);
             var eventData = deserialize(e.data);
@@ -256,7 +308,7 @@
      */
     function Postmate(userOptions) {
         var self = this;
-        var container = typeof container !== 'undefined' ? container : document.body;
+        var container = document.body;
         if (userOptions.container) {
             container = userOptions.container;
         }
@@ -284,7 +336,8 @@
                     if (eventData.postmate === 'handshake-reply') {
                         clearInterval(responseInterval);
                         log('Parent: Received handshake reply from Child');
-                        self.parent.removeEventListener('message', reply, false);
+                        // self.parent.removeEventListener('message', reply, false);
+                        removeEvents(self.parent, 'message', reply);
                         self.childOrigin = e.origin;
                         log('Parent: Saving Child origin', self.childOrigin);
                         return resolve(new ParentAPI(self));
@@ -296,7 +349,8 @@
                     return reject('Failed handshake');
                 };
 
-                self.parent.addEventListener('message', reply, false);
+                // self.parent.addEventListener('message', reply, false);
+                addEvents(self.parent, 'message', reply);
 
                 var doSend = function () {
                     attempt++;
@@ -363,7 +417,8 @@
                     }
                     if (eventData.postmate === 'handshake') {
                         log('Child: Received handshake from Parent');
-                        self.child.removeEventListener('message', shake, false);
+                        // self.child.removeEventListener('message', shake, false);
+                        removeEvents(self.child, 'message', shake);
                         log('Child: Sending handshake reply to Parent');
                         e.source.postMessage(serialize({
                             postmate: 'handshake-reply',
@@ -391,7 +446,8 @@
                     }
                     return reject('Handshake Reply Failed');
                 };
-                self.child.addEventListener('message', shake, false);
+                // self.child.addEventListener('message', shake, false);
+                addEvents(self.child, 'message', shake);
             });
         };
 
